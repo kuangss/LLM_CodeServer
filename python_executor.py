@@ -120,9 +120,9 @@ class PythonExecutor:
 
     @staticmethod
     def truncate(s, max_length=800):
-        half = max_length // 2
-        if len(s) > max_length:
-            s = s[:half] + "..." + s[-half:]
+        # half = max_length // 2
+        # if len(s) > max_length:
+        #     s = s[:half] + "..." + s[-half:]
         return s
 
     def batch_apply(self, batch_code):

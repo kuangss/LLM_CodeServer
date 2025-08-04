@@ -6,13 +6,13 @@ import argparse
 import time
 from openai import OpenAI
 from multiprocessing import Process
-from utils import get_end_of_string, text_to_stream, concate_chunks
+from utils import get_end_of_string, text_to_stream, concate_chunks, get_chuncked_content
 from python_executor import PythonExecutor
 from parser import extract_jupyter_like_program, extract_program, process_string
 
 CHUNK_SIZE = 100
 DEBUG = False
-LOG = False
+LOG = True
 GMT_FORMAT='%a, %d %b %Y %H:%M:%S GMT'
 
 app = Flask(__name__)
@@ -23,7 +23,8 @@ def parse_args():
     parser.add_argument("--max_func_call", default=5, type=int)
     parser.add_argument("--func_call_mode", default="jupyter", type=str)
     parser.add_argument("--func_call_timeout", default=30, type=int)
-    parser.add_argument("--target_url", default="http://localhost:3000", type=str)
+    parser.add_argument("--port", default=5001, type=int)
+    parser.add_argument("--target_url", default="https://api.siliconflow.cn", type=str)
     
     args = parser.parse_args()
     print(f"args detail:")
@@ -67,82 +68,153 @@ def chat_completions(path=None):
     req_headers = {key:value for key, value in request.headers.items()}
     req_dict = request.get_json()
     req_args = request.args
-    
+
     if "stream" in req_dict.keys() and req_dict["stream"] == True:
-        
         def generate():
             is_finished = 0
-            for epoch in range(args.max_func_call):
+            # do the first time with chat mode
+            # send modified request
+            response = requests.request(
+                req_method,
+                f"{args.target_url}/v1/chat/completions",
+                headers=req_headers,
+                json=req_dict,
+                params=req_args,
+                stream=True
+            )
+            received = ""
+            received_text = ""
+            for chunk in response.iter_content(chunk_size=CHUNK_SIZE, decode_unicode=True):
+
+                if chunk:
+                    received += chunk
+                    is_finished, received_text, received, last_chunk = concate_chunks(received_text, received)
+                    # is_finished = 1: end with </answer>, is_finished = 0: not finished, is_finished = -1: end with length
+                    if last_chunk != "":
+                        template = last_chunk
+
+                    # check if has code, concate the exec result by responding a chunk
+                    has_code, response_text = process_string(received_text)
+                    # has_code = 1: with complete code, has_code = 0: no code, has_code = -1: with incomplete code
+
+
+                    if has_code == 1:
+                        # Execute the remain prompts
+                        is_lack_token = False
+                        exec_result = get_exec_result(response_text, is_lack_token)
+                        response_text += "\nsystem:\n" + exec_result
+
+                        # add response and exec_result to messages
+                        messages.append({"role":"assistant", "content": response_text})
+                        if DEBUG:
+                            print(received_text)
+                        remain_text = get_end_of_string(received_text, template='```')
+                        more_chunks = text_to_stream(remain_text + exec_result, template)
+                        # send the last chunk first
+                        more_chunks = [chunk] + more_chunks
+                        if is_finished == 1:
+                            more_chunks = more_chunks + text_to_stream("</answer>", template) + ["data: [DONE]\n\n"]
+                        for more_chunk in more_chunks:
+                            yield more_chunk
+                        break
+
+                    if LOG:
+                        print(received_text)
+
+                    # end the loop, or continue by another request
+                    if is_finished == 1:
+                        more_chunks = text_to_stream("</answer>", template)
+                        more_chunks = [chunk] + more_chunks + ["data: [DONE]\n\n"]
+                        for more_chunk in more_chunks:
+                            yield more_chunk
+                        break
+                    elif is_finished == 0:
+                        yield chunk
+                    elif is_finished == -1:
+                        if has_code == 0:
+                            return
+                        yield chunk
+
+            query = "".join([message["role"] + ":\n" + message["content"] + '\n' for message in messages])
+
+            query += "\nassistant:\n"
+            for epoch in range(1, args.max_func_call):
                 if is_finished == 1:
                     return
-                # change message to add result of code
-                req_dict["messages"] = messages
-                # to ensure length of content
+                query +=  response_text + "\nassistant:\n"
+                req_dict['prompt'] = query
+                req_dict['max_tokens'] = req_dict["max_tokens"] if "max_tokens" in req_dict else 8192
                 req_json = json.dumps(req_dict, ensure_ascii=False)
                 req_bytes = bytes(req_json, encoding='utf-8')
-                req_headers["Content-Length"] = str(len(req_bytes))
-
-                # send modified request
+                req_headers["Content-Length"] = str(len(req_bytes)) # to ensure length of content
                 response = requests.request(
-                    req_method,
-                    f"{args.target_url}/v1/chat/completions",
+                    "POST",
+                    f"{args.target_url}/v1/completions",
                     headers=req_headers,
                     data=req_bytes,
-                    params=req_args,
                     stream=True
                 )
-
-                received = ""
                 received_text = ""
-                for chunk in response.iter_content(chunk_size=CHUNK_SIZE, decode_unicode=True):
+                for chunk in response.iter_lines(chunk_size=CHUNK_SIZE, decode_unicode=True):
 
                     if chunk:
-                        received += chunk
-                        is_finished, received_text, received, last_chunk = concate_chunks(received_text, received)
+                        if chunk == "data: [DONE]":
+                            is_finished = -1
+                        else:
+                            is_finished = 0
+                            try:
+                                chunk_text = get_chuncked_content(json.loads(chunk.split("data: ")[1])["choices"][0])
+                            except:
+                                yield chunk
+                                is_finished = 1
+                                break
+                            received_text += chunk_text
                         # is_finished = 1: end with </answer>, is_finished = 0: not finished, is_finished = -1: end with length
-                        if last_chunk != "" and epoch == 0:
-                            template = last_chunk
-                        
+
                         # check if has code, concate the exec result by responding a chunk
                         has_code, response_text = process_string(received_text)
                         # has_code = 1: with complete code, has_code = 0: no code, has_code = -1: with incomplete code
-
 
                         if has_code == 1:
                             # Execute the remain prompts
                             is_lack_token = epoch >= args.max_func_call - 2
                             exec_result = get_exec_result(response_text, is_lack_token)
-                            response_text += exec_result
-
-                            # add response and exec_result to messages
-                            messages.append({"role":"assistant", "content": response_text})
+                            response_text += "\nsystem:\n" + exec_result
                             if DEBUG:
                                 print(received_text)
                             remain_text = get_end_of_string(received_text)
-                            more_chunks = text_to_stream(remain_text + exec_result, template)
-                            # send the last chunk first
-                            more_chunks = [chunk] + more_chunks
+                            more_chunks = text_to_stream(chunk_text + remain_text + exec_result, template)
+                            
                             if is_finished == 1:
-                                more_chunks = more_chunks + text_to_stream("</answer>", template) + ["data: [DONE]\n\n"]
+                                more_chunks = more_chunks + text_to_stream("</answer>", template) + [
+                                    "data: [DONE]\n\n"]
                             for more_chunk in more_chunks:
                                 yield more_chunk
                             break
 
                         if LOG:
+                            # print(chunk)
                             print(received_text)
 
                         # end the loop, or continue by another request
                         if is_finished == 1:
-                            more_chunks = text_to_stream("</answer>", template)
-                            more_chunks = [chunk] + more_chunks + ["data: [DONE]\n\n"]
+                            more_chunks = text_to_stream(chunk_text + "</answer>", template)
+                            more_chunks = more_chunks + ["data: [DONE]\n\n"]
                             for more_chunk in more_chunks:
                                 yield more_chunk
                             break
                         elif is_finished == 0:
-                            yield chunk
+                            
+                            more_chunks = text_to_stream(chunk_text, template)
+                            for more_chunk in more_chunks:
+                                yield more_chunk
+                            
                         elif is_finished == -1:
-                            return
-                
+                            if has_code == 0:
+                                return
+                            pass
+
+
 
         return Response(
             generate(),
@@ -250,7 +322,7 @@ def completions(path=None):
                     if chunk:
                         received += chunk
                         is_finished, received_text, received, last_chunk = concate_chunks(received_text, received)
-                        # flag = 1: with complete code, flag = 0: no code, flag = -1: with incomplete code
+                        # is_finished = 1: end with </answer>, is_finished = 0: not finished, is_finished = -1: end with length
                         if last_chunk != "" and epoch == 0:
                             template = last_chunk
                         
@@ -322,7 +394,7 @@ def completions(path=None):
             if DEBUG:
                 try:
                     print("="*9)
-                    print(response.json()['choices'][0]['finish_reason'], response.json()['choices'][0]['stop_reason'])
+                    print(response.json()['choices'][0]['finish_reason'])#, response.json()['choices'][0]['stop_reason']
                     print("="*9)
                 except Exception as e:
                     print(e)
@@ -333,9 +405,11 @@ def completions(path=None):
                 exec_result = get_exec_result(response_text, is_lack_token)
                 query += exec_result
             else:
-                if response.json()['choices'][0]['finish_reason'] == "stop" and response.json()['choices'][0]['stop_reason'] in ["</answer>"]:
-                    query += response.json()['choices'][0]['stop_reason']
-                    break
+                if 'finish_reason' in response.json()['choices'][0]:
+                    if response.json()['choices'][0]['finish_reason'] == "stop":
+                    # if response.json()['choices'][0]['finish_reason'] == "stop" and response.json()['choices'][0]['stop_reason'] in ["</answer>"]:
+                    #     query += response.json()['choices'][0]['stop_reason']
+                        break
 
             if LOG:
                 print(query)
@@ -352,4 +426,4 @@ def completions(path=None):
 if __name__ == '__main__':
     args = parse_args()
 
-    app.run(debug=True, host="0.0.0.0", port=5000)
+    app.run(debug=True, host="0.0.0.0", port=args.port)

@@ -10,7 +10,7 @@ A proxy server that make your LLM support auto code execution.
 
 ## Requirements
 ```bash
-pip install flask requests openai python-executor
+pip install flask requests openai numpy regex python-dateutil multiprocess pebble timeout_decorator sympy
 ```
 
 ## Usage
@@ -44,4 +44,4 @@ python vllm_code_serve.py --target_url http://localhost:3000 \
 - DEBUG and LOG flags can be enabled for detailed output
 - Supports both standard and Jupyter-like code execution modes
 - Each code snippet is wrapped with```python\ncode snippet\n```
-- The last part of your response should be:<answer>\\boxed{'The final answer goes here.'}</answer>
+- The last part of your response should be:```<answer>\\boxed{'The final answer goes here.'}</answer>```

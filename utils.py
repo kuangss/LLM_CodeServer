@@ -43,8 +43,10 @@ def get_chuncked_content(data_dict):
     if "text" in data_dict.keys():
         return data_dict["text"]
     elif "delta" in data_dict.keys():
-        if "content" in data_dict["delta"]:
+        if "content" in data_dict["delta"] and data_dict["delta"]["content"] != None:
             return data_dict["delta"]["content"]
+        elif "reasoning_content" in data_dict["delta"] and data_dict["delta"]["reasoning_content"] != None:
+            return data_dict["delta"]["reasoning_content"]
     return ""
 
 
@@ -86,16 +88,19 @@ def text_to_stream(text_str, template):
     if "text" in template_dict["choices"][0].keys():
         template_dict["choices"][0]["text"] = text_str
     elif "delta" in template_dict["choices"][0].keys():
-        if "content" in template_dict["choices"][0]["delta"]:
+        if "content" in template_dict["choices"][0]["delta"] and template_dict["choices"][0]["delta"]["content"] != None:
             template_dict["choices"][0]["delta"]["content"] = text_str
+        elif "reasoning_content" in template_dict["choices"][0]["delta"] and template_dict["choices"][0]["delta"]["reasoning_content"] != None:
+            template_dict["choices"][0]["delta"]["reasoning_content"] = text_str
         
     chunks = response_to_chunk(template_dict)
     return chunks
 
 
 def get_end_of_string(text, template="</code>"):
-    text = text.strip('\n')
-    for i, t in enumerate(template):
-        if text[-1] == t:
-            return template[i+1:]
-    return template
+    # text = text.strip('\n')
+    # for i, t in enumerate(template):
+    #     if text[-1] == t:
+    #         return template[i+1:]
+    # return template
+    return ""
