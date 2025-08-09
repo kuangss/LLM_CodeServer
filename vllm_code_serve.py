@@ -24,7 +24,7 @@ def parse_args():
     parser.add_argument("--func_call_mode", default="jupyter", type=str)
     parser.add_argument("--func_call_timeout", default=30, type=int)
     parser.add_argument("--port", default=5001, type=int)
-    parser.add_argument("--target_url", default="https://api.siliconflow.cn", type=str)
+    parser.add_argument("--target_url", default="http://localhost:8888", type=str)
     
     args = parser.parse_args()
     print(f"args detail:")
@@ -102,7 +102,7 @@ def chat_completions(path=None):
                         # Execute the remain prompts
                         is_lack_token = False
                         exec_result = get_exec_result(response_text, is_lack_token)
-                        response_text += "\nsystem:\n" + exec_result
+                        response_text += exec_result
 
                         # add response and exec_result to messages
                         messages.append({"role":"assistant", "content": response_text})
@@ -135,13 +135,12 @@ def chat_completions(path=None):
                             return
                         yield chunk
 
-            query = "".join([message["role"] + ":\n" + message["content"] + '\n' for message in messages])
+            query = "".join([message["role"] + ":\n" + message["content"] + '\n' for message in messages[:-1]])
 
-            query += "\nassistant:\n"
             for epoch in range(1, args.max_func_call):
                 if is_finished == 1:
                     return
-                query +=  response_text + "\nassistant:\n"
+                query +=  response_text
                 req_dict['prompt'] = query
                 req_dict['max_tokens'] = req_dict["max_tokens"] if "max_tokens" in req_dict else 8192
                 req_json = json.dumps(req_dict, ensure_ascii=False)
@@ -179,7 +178,7 @@ def chat_completions(path=None):
                             # Execute the remain prompts
                             is_lack_token = epoch >= args.max_func_call - 2
                             exec_result = get_exec_result(response_text, is_lack_token)
-                            response_text += "\nsystem:\n" + exec_result
+                            response_text += exec_result
                             if DEBUG:
                                 print(received_text)
                             remain_text = get_end_of_string(received_text)
