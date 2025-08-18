@@ -9,6 +9,7 @@ from multiprocessing import Process
 from utils import get_end_of_string, text_to_stream, concate_chunks, get_chuncked_content
 from python_executor import PythonExecutor
 from parser import extract_jupyter_like_program, extract_program, process_string
+import asyncio
 
 CHUNK_SIZE = 100
 DEBUG = False
@@ -23,7 +24,7 @@ def parse_args():
     parser.add_argument("--max_func_call", default=5, type=int)
     parser.add_argument("--func_call_mode", default="jupyter", type=str)
     parser.add_argument("--func_call_timeout", default=30, type=int)
-    parser.add_argument("--port", default=5001, type=int)
+    parser.add_argument("--port", default=5002, type=int)
     parser.add_argument("--target_url", default="http://localhost:8888", type=str)
     
     args = parser.parse_args()
@@ -55,8 +56,13 @@ def get_exec_result(response_text, is_lack_token):
     return exec_result
 
 
+async def complete_one(**args):
+    response = requests.request(**args)
+    return response
+
+
 @app.route('/v1/chat/completions', methods=['GET', 'POST', 'PUT', 'DELETE'])
-def chat_completions(path=None):
+async def chat_completions(path=None):
     rsp_headers = {'date': datetime.datetime.now(datetime.timezone.utc).strftime(GMT_FORMAT), 
                    'server': 'uvicorn', 
                    'content-type': 'text/event-stream; charset=utf-8', 
@@ -223,53 +229,106 @@ def chat_completions(path=None):
 
     
     else:
-        # combine LLM's and CI's response
-        all_response = ""
-        for epoch in range(args.max_func_call):
-            # change message to add result of code
-            req_dict["messages"] = messages
-            # to ensure length of content
-            req_json = json.dumps(req_dict, ensure_ascii=False)
-            req_bytes = bytes(req_json, encoding='utf-8')
-            req_headers["Content-Length"] = str(len(req_bytes)) # to ensure length of content
-            # send modified request
-            response = requests.request(
-                req_method,
-                f"{args.target_url}/v1/chat/completions",
-                headers=req_headers,
-                data=req_bytes,
-                params=request.args,
-            )
-            flag, response_text = process_string(response.json()["choices"][0]["message"]["content"])
+        n_sample = req_dict["n"]
+
+        # first epoch
+        # send modified request
+        response = requests.request(
+            method=req_method,
+            url=f"{args.target_url}/v1/chat/completions",
+            headers=req_headers,
+            json=req_dict,
+            params=request.args,
+        )
+        # cache the first response
+        prompt_tokens = response.json()["usage"]["prompt_tokens"]
+        template = response
+
+        response_texts = []
+        flags = []
+        messages_samples = []
+        for choice in response.json()["choices"]:
+
+            flag, response_text = process_string(choice["message"]["content"])
             # flag = 1: with complete code, flag = 0: no code, flag = -1: with incomplete code
-            # cache the first response
-            if epoch == 0:
-                prompt_tokens = response.json()["usage"]["prompt_tokens"]
-                template = response
             # add content to the messages and response
             messages.append({"role": "assistant", "content": response_text})
-            all_response += response_text
-
+            response_texts.append(response_text)
             # Execute the remain prompts
             if flag == 1:
                 # add user content
-                is_lack_token = epoch >= args.max_func_call - 2
+                is_lack_token = 2 >= args.max_func_call
                 exec_result = get_exec_result(response_text, is_lack_token)
                 messages.append({"role":"user", "content":exec_result})
-                all_response += exec_result
+                response_texts[-1] += exec_result
             else:
                 # break if no code is to exec
-                if response.json()['choices'][0]['finish_reason'] == "stop" and response.json()['choices'][0]['stop_reason'] in ["</answer>"]:
+                if choice['finish_reason'] == "stop" and choice['stop_reason'] in ["</answer>"]:
                     # print(response.json()['choices'][0]['stop_reason'] in ["</answer>"])
-                    messages[-1]["content"] += response.json()['choices'][0]['stop_reason']
-                    all_response += response.json()['choices'][0]['stop_reason']
-                break
+                    messages[-1]["content"] += choice['stop_reason']
+                    response_texts[-1] += choice['stop_reason']
+
+            messages_samples.append(messages)
+            flags.append(flag)
+
             if LOG:
-                print(all_response)
+                print(response_texts[-1])
+
+
+
+        for epoch in range(1, args.max_func_call):
+            request_dicts = []
+            request_indexes = []
+            for index, (flag, messages) in enumerate(zip(flags, messages_samples)):
+                if flag == 1:
+                    request_indexes.append(index)
+                    # change message to add result of code
+                    req_dict["messages"] = messages
+                    req_dict["n"] = 1
+                    # to ensure length of content
+                    req_json = json.dumps(req_dict, ensure_ascii=False)
+                    req_bytes = bytes(req_json, encoding='utf-8')
+                    req_headers["Content-Length"] = str(len(req_bytes)) # to ensure length of content
+                    # send modified request
+                    request_dicts.append({
+                        "method":req_method,
+                        "url":f"{args.target_url}/v1/chat/completions",
+                        "headers":req_headers,
+                        "data":req_bytes,
+                        "params":request.args
+                        })
+            tasks = [asyncio.create_task(complete_one(**request_dict)) for request_dict in request_dicts]
+            responses = await asyncio.gather(*tasks)
+            for index, response in zip(request_indexes, responses):
+                flag, response_text = process_string(response.json()["choices"][0]["message"]["content"])
+                # flag = 1: with complete code, flag = 0: no code, flag = -1: with incomplete code
+                
+                # add content to the messages and response
+                messages_samples[index].append({"role": "assistant", "content": response_text})
+                response_texts[index] += response_text
+                flags[index] = flag
+
+                # Execute the remain prompts
+                if flag == 1:
+                    # add user content
+                    is_lack_token = epoch >= args.max_func_call - 2
+                    exec_result = get_exec_result(response_text, is_lack_token)
+                    messages_samples[index].append({"role":"user", "content":exec_result})
+                    response_texts[index] += exec_result
+                else:
+                    # break if no code is to exec
+                    if response.json()['choices'][0]['finish_reason'] == "stop" and response.json()['choices'][0]['stop_reason'] in ["</answer>"]:
+                        # print(response.json()['choices'][0]['stop_reason'] in ["</answer>"])
+                        messages[-1]["content"] += response.json()['choices'][0]['stop_reason']
+                        all_response += response.json()['choices'][0]['stop_reason']
+                    break
+                if LOG:
+                    print(response_texts[index])
 
         # complete the response
         response_content_dict = template.json()
-        response_content_dict["choices"][0]["message"]["content"] = all_response
+        for i in range(n_sample):
+            response_content_dict["choices"][i]["message"]["content"] = response_texts[i]
         response_content_dict["usage"]["completion_tokens"] = response.json()["usage"]["total_tokens"] - prompt_tokens
         response_content_dict["usage"]["prompt_tokens"] = prompt_tokens
 
@@ -292,7 +351,7 @@ def completions(path=None):
                    'content-type': 'text/event-stream; charset=utf-8', 
                    'connection': 'close'}
 
-    if "stream" in req_dict.keys() and req_dict["stream"] == True:
+    if "stream" in req_dict.keys() and req_dict["stream"] == True :
         params = request.args
         def generate():
             response_text = ""

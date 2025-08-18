@@ -10,7 +10,7 @@ A proxy server that make your LLM support auto code execution.
 
 ## Requirements
 ```bash
-pip install flask requests openai numpy regex python-dateutil multiprocess pebble timeout_decorator sympy
+pip install flask[async] requests openai numpy regex python-dateutil multiprocess pebble timeout_decorator sympy
 ```
 
 ## Usage
