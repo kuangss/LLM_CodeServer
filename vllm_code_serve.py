@@ -25,7 +25,7 @@ def parse_args():
     parser.add_argument("--func_call_mode", default="jupyter", type=str)
     parser.add_argument("--func_call_timeout", default=30, type=int)
     parser.add_argument("--port", default=5002, type=int)
-    parser.add_argument("--target_url", default="http://localhost:8888", type=str)
+    parser.add_argument("--target_url", default="https://api.siliconflow.cn", type=str)
     
     args = parser.parse_args()
     print(f"args detail:")
@@ -72,6 +72,8 @@ async def chat_completions(path=None):
     # 获取请求数据
     req_method = request.method
     req_headers = {key:value for key, value in request.headers.items()}
+    req_headers["Host"] = args.target_url.split("//")[-1]
+    # req_headers["Accept-Encoding"] = "identity"
     req_dict = request.get_json()
     req_args = request.args
 
@@ -88,16 +90,21 @@ async def chat_completions(path=None):
                 params=req_args,
                 stream=True
             )
+            response_encoding = response.encoding
+            response_headers_encoding = response.headers.get('Content-Encoding')
+            print(response_headers_encoding)
             received = ""
             received_text = ""
             for chunk in response.iter_content(chunk_size=CHUNK_SIZE, decode_unicode=True):
 
                 if chunk:
                     received += chunk
-                    is_finished, received_text, received, last_chunk = concate_chunks(received_text, received)
+                    is_finished, received_text, chunk_text, received, last_chunk = concate_chunks(received_text, received, response_encoding)
                     # is_finished = 1: end with </answer>, is_finished = 0: not finished, is_finished = -1: end with length
                     if last_chunk != "":
                         template = last_chunk
+                    if LOG:
+                        print(received_text, end="")
 
                     # check if has code, concate the exec result by responding a chunk
                     has_code, response_text = process_string(received_text)
@@ -160,20 +167,11 @@ async def chat_completions(path=None):
                     stream=True
                 )
                 received_text = ""
-                for chunk in response.iter_lines(chunk_size=CHUNK_SIZE, decode_unicode=True):
+                for chunk in response.iter_content(chunk_size=CHUNK_SIZE, decode_unicode=True):
 
                     if chunk:
-                        if chunk == "data: [DONE]":
-                            is_finished = -1
-                        else:
-                            is_finished = 0
-                            try:
-                                chunk_text = get_chuncked_content(json.loads(chunk.split("data: ")[1])["choices"][0])
-                            except:
-                                yield chunk
-                                is_finished = 1
-                                break
-                            received_text += chunk_text
+                        received += chunk
+                        is_finished, received_text, chunk_text, received, last_chunk = concate_chunks(received_text, received, response_encoding)
                         # is_finished = 1: end with </answer>, is_finished = 0: not finished, is_finished = -1: end with length
 
                         # check if has code, concate the exec result by responding a chunk
@@ -229,6 +227,7 @@ async def chat_completions(path=None):
 
     
     else:
+        req_dict["n"] = req_dict["n"] if "n" in req_dict.keys() else 1
         n_sample = req_dict["n"]
 
         # first epoch
@@ -319,8 +318,8 @@ async def chat_completions(path=None):
                     # break if no code is to exec
                     if response.json()['choices'][0]['finish_reason'] == "stop" and response.json()['choices'][0]['stop_reason'] in ["</answer>"]:
                         # print(response.json()['choices'][0]['stop_reason'] in ["</answer>"])
-                        messages[-1]["content"] += response.json()['choices'][0]['stop_reason']
-                        all_response += response.json()['choices'][0]['stop_reason']
+                        messages_samples[index][-1]["content"] += response.json()['choices'][0]['stop_reason']
+                        response_texts[index] += response.json()['choices'][0]['stop_reason']
                     break
                 if LOG:
                     print(response_texts[index])
@@ -379,7 +378,7 @@ def completions(path=None):
 
                     if chunk:
                         received += chunk
-                        is_finished, received_text, received, last_chunk = concate_chunks(received_text, received)
+                        is_finished, received_text, chunk_text, received, last_chunk = concate_chunks(received_text, received)
                         # is_finished = 1: end with </answer>, is_finished = 0: not finished, is_finished = -1: end with length
                         if last_chunk != "" and epoch == 0:
                             template = last_chunk

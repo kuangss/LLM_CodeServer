@@ -39,29 +39,33 @@ def prompt2messages(prompt):
         
     return {"messages": contents}
 
-def get_chuncked_content(data_dict):
+def get_chuncked_content(data_dict, encoding="utf-8"):
     if "text" in data_dict.keys():
-        return data_dict["text"]
+        content = data_dict["text"]
     elif "delta" in data_dict.keys():
         if "content" in data_dict["delta"] and data_dict["delta"]["content"] != None:
-            return data_dict["delta"]["content"]
+            content = data_dict["delta"]["content"]
         elif "reasoning_content" in data_dict["delta"] and data_dict["delta"]["reasoning_content"] != None:
-            return data_dict["delta"]["reasoning_content"]
-    return ""
+            content = data_dict["delta"]["reasoning_content"]
+    else: 
+        content = ""
+    return content.encode(encoding).decode("utf-8")
 
 
-def concate_chunks(received_text, received_chunks):
+def concate_chunks(received_text, received_chunks, encoding="utf-8"):
     last_chunk = ""
     flag = 0
     chunks = received_chunks.split('\n\n')
+    chunk_text = ""
     if len(chunks) > 1:
         for chunk in chunks[:-1]:
             if chunk != "data: [DONE]":
                 last_chunk = chunk
                 data = json.loads(chunk.split("data: ")[1])["choices"][0]
-                received_text += get_chuncked_content(data)
-                if not data["finish_reason"] in ["length", None]:
-                    if data["stop_reason"] in ["</answer>"]:
+                chunk_text = get_chuncked_content(data, encoding)
+                received_text += chunk_text
+                if "finish_reason" in data.keys() and not data["finish_reason"] in ["length", None]:
+                    if "stop_reason" in data.keys() and data["stop_reason"] in ["</answer>"]:
                         # print(data["finish_reason"])
                         flag = 1
             else:
@@ -69,7 +73,7 @@ def concate_chunks(received_text, received_chunks):
                 if DEBUG:
                     print("="*9)
                     print(chunk)
-    return flag, received_text, chunks[-1], last_chunk
+    return flag, received_text, chunk_text, chunks[-1], last_chunk
 
 def response_to_chunk(response_dict, chunksize=100):
     response_str = "data: " + json.dumps(response_dict, ensure_ascii=False) + '\n'*2

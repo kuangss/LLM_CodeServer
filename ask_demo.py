@@ -46,11 +46,11 @@ def ask_openai_stream(base_url="http://localhost:5000/v1", model_name="Qwen3-8B"
     print("="*9)
     print(output)
     
-def chat_openai(base_url="http://localhost:5000/v1", model_name="Qwen3-8B", stop_str = ["</answer>", "</code>"]):
+def chat_openai(base_url="http://localhost:5000/v1", model_name="Qwen3-8B", api_key="EMPTY", stop_str = ["</answer>", "</code>"]):
 
     client = OpenAI(
     base_url=base_url,
-    api_key="EMPTY",
+    api_key=api_key,
     )
     tools = [{
         "type": "function",
@@ -94,9 +94,9 @@ def chat_openai(base_url="http://localhost:5000/v1", model_name="Qwen3-8B", stop
     }]
     chat_completion = client.chat.completions.create(
         messages=messages,
-        max_tokens=4096,
+        max_tokens=256,
         model=model_name,
-        tools=tools,
+        # tools=tools,
         stop=stop_str)
 
     print(chat_completion)
@@ -173,12 +173,12 @@ def chat_openai_stream(base_url="http://localhost:5000/v1", model_name="Qwen3-8B
 
 
 if __name__ == '__main__':
-    base_url="http://localhost:5001/v1"
+    base_url="http://localhost:5002/v1"
     # base_url="https://api.siliconflow.cn/v1"
     model_name="deepseek-ai/DeepSeek-R1"
     API_key = "EMPTY"
     stop_str = ["</answer>"]
     # ask_openai_stream(base_url, model_name, stop_str)
     # ask_openai(base_url, model_name, stop_str)
-    chat_openai_stream(base_url, model_name, API_key, stop_str)
-    # chat_openai(base_url, model_name, stop_str)
+    # chat_openai_stream(base_url, model_name, API_key, stop_str)
+    chat_openai(base_url, model_name, API_key, stop_str)
