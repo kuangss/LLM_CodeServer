@@ -9,11 +9,13 @@ from multiprocessing import Process
 from utils import get_end_of_string, text_to_stream, concate_chunks, get_chuncked_content
 from python_executor import PythonExecutor
 from parser import extract_jupyter_like_program, extract_program, process_string
-import asyncio
+import multiprocessing
+from tqdm import tqdm
 
+num_threads = 16
 CHUNK_SIZE = 100
 DEBUG = False
-LOG = True
+LOG = False
 GMT_FORMAT='%a, %d %b %Y %H:%M:%S GMT'
 
 app = Flask(__name__)
@@ -26,6 +28,7 @@ def parse_args():
     parser.add_argument("--func_call_timeout", default=30, type=int)
     parser.add_argument("--port", default=5002, type=int)
     parser.add_argument("--target_url", default="https://api.siliconflow.cn", type=str)
+    parser.add_argument("--stop_strs", default=["</answer>"], type=str)
     
     args = parser.parse_args()
     print(f"args detail:")
@@ -56,13 +59,13 @@ def get_exec_result(response_text, is_lack_token):
     return exec_result
 
 
-async def complete_one(**args):
+def complete_one(args):
     response = requests.request(**args)
     return response
 
 
 @app.route('/v1/chat/completions', methods=['GET', 'POST', 'PUT', 'DELETE'])
-async def chat_completions(path=None):
+def chat_completions(path=None):
     rsp_headers = {'date': datetime.datetime.now(datetime.timezone.utc).strftime(GMT_FORMAT), 
                    'server': 'uvicorn', 
                    'content-type': 'text/event-stream; charset=utf-8', 
@@ -75,6 +78,8 @@ async def chat_completions(path=None):
     req_headers["Host"] = args.target_url.split("//")[-1]
     # req_headers["Accept-Encoding"] = "identity"
     req_dict = request.get_json()
+    # req_dict["stop"] = args.stop_strs
+    # req_dict["priority"] = 1
     req_args = request.args
 
     if "stream" in req_dict.keys() and req_dict["stream"] == True:
@@ -156,6 +161,8 @@ async def chat_completions(path=None):
                 query +=  response_text
                 req_dict['prompt'] = query
                 req_dict['max_tokens'] = req_dict["max_tokens"] if "max_tokens" in req_dict else 8192
+                # req_dict["priority"] = 0
+                req_dict.pop("messages", None)
                 req_json = json.dumps(req_dict, ensure_ascii=False)
                 req_bytes = bytes(req_json, encoding='utf-8')
                 req_headers["Content-Length"] = str(len(req_bytes)) # to ensure length of content
@@ -246,8 +253,9 @@ async def chat_completions(path=None):
         response_texts = []
         flags = []
         messages_samples = []
+        raw_messages = messages.copy()
         for choice in response.json()["choices"]:
-
+            messages = raw_messages.copy()
             flag, response_text = process_string(choice["message"]["content"])
             # flag = 1: with complete code, flag = 0: no code, flag = -1: with incomplete code
             # add content to the messages and response
@@ -296,8 +304,18 @@ async def chat_completions(path=None):
                         "data":req_bytes,
                         "params":request.args
                         })
-            tasks = [asyncio.create_task(complete_one(**request_dict)) for request_dict in request_dicts]
-            responses = await asyncio.gather(*tasks)
+            pbar = tqdm(total=len(request_dicts))
+            pbar.set_description(f"Asking {epoch}")
+            update = lambda *args: pbar.update()
+            pool = multiprocessing.Pool(num_threads)
+            list_of_answers = []
+            for index, request_dict in enumerate(request_dicts):
+                answer = pool.apply_async(complete_one, args=(request_dict, ), callback=update)
+                list_of_answers.append(answer)
+            pool.close()
+            pool.join()
+            responses = [answer.get() for answer in list_of_answers]
+
             for index, response in zip(request_indexes, responses):
                 flag, response_text = process_string(response.json()["choices"][0]["message"]["content"])
                 # flag = 1: with complete code, flag = 0: no code, flag = -1: with incomplete code
@@ -306,7 +324,6 @@ async def chat_completions(path=None):
                 messages_samples[index].append({"role": "assistant", "content": response_text})
                 response_texts[index] += response_text
                 flags[index] = flag
-
                 # Execute the remain prompts
                 if flag == 1:
                     # add user content
@@ -320,7 +337,6 @@ async def chat_completions(path=None):
                         # print(response.json()['choices'][0]['stop_reason'] in ["</answer>"])
                         messages_samples[index][-1]["content"] += response.json()['choices'][0]['stop_reason']
                         response_texts[index] += response.json()['choices'][0]['stop_reason']
-                    break
                 if LOG:
                     print(response_texts[index])
 

@@ -47,6 +47,8 @@ def get_chuncked_content(data_dict, encoding="utf-8"):
             content = data_dict["delta"]["content"]
         elif "reasoning_content" in data_dict["delta"] and data_dict["delta"]["reasoning_content"] != None:
             content = data_dict["delta"]["reasoning_content"]
+        else:
+            content = ""
     else: 
         content = ""
     return content.encode(encoding).decode("utf-8")
@@ -61,6 +63,9 @@ def concate_chunks(received_text, received_chunks, encoding="utf-8"):
         for chunk in chunks[:-1]:
             if chunk != "data: [DONE]":
                 last_chunk = chunk
+                if "error" in json.loads(chunk.split("data: ")[1]).keys():
+                    flag = -1
+                    break
                 data = json.loads(chunk.split("data: ")[1])["choices"][0]
                 chunk_text = get_chuncked_content(data, encoding)
                 received_text += chunk_text
