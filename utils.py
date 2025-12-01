@@ -63,12 +63,20 @@ def concate_chunks(received_text, received_chunks, encoding="utf-8"):
         for chunk in chunks[:-1]:
             if chunk != "data: [DONE]":
                 last_chunk = chunk
-                if "error" in json.loads(chunk.split("data: ")[1]).keys():
-                    flag = -1
-                    break
-                data = json.loads(chunk.split("data: ")[1])["choices"][0]
-                chunk_text = get_chuncked_content(data, encoding)
-                received_text += chunk_text
+                try:
+                    data = json.loads(chunk.split("data: ")[1])["choices"][0]
+                    chunk_text = get_chuncked_content(data, encoding)
+                    received_text += chunk_text
+                except:
+                    print(chunk)
+                    if "data: " in chunk:
+                        data = json.loads(chunk.split("data: ")[1])['error']['message']
+                    else:
+                        data = json.loads(chunk)['message']
+                    print(data)
+                    received_text += data
+                    flag = -2
+                    return flag, received_text, chunk_text, chunks[-1], last_chunk
                 if "finish_reason" in data.keys() and not data["finish_reason"] in ["length", None]:
                     if "stop_reason" in data.keys() and data["stop_reason"] in ["</answer>"]:
                         # print(data["finish_reason"])
@@ -78,6 +86,24 @@ def concate_chunks(received_text, received_chunks, encoding="utf-8"):
                 if DEBUG:
                     print("="*9)
                     print(chunk)
+    else:
+        if chunks[0] == "data: [DONE]":
+            flag = -1
+            if DEBUG:
+                print("="*9)
+                print(chunks[0])
+        try:
+            if "data: " in chunks[0]:
+                data = json.loads(chunks[0].split("data: ")[1])['error']['message']
+            else:
+                data = json.loads(chunks[0])['message']
+            print(data)
+            received_text += data
+            flag = -2
+        except:
+            pass
+        return flag, received_text, chunk_text, chunks[-1], last_chunk
+
     return flag, received_text, chunk_text, chunks[-1], last_chunk
 
 def response_to_chunk(response_dict, chunksize=100):
@@ -113,3 +139,4 @@ def get_end_of_string(text, template="</code>"):
     #         return template[i+1:]
     # return template
     return ""
+
