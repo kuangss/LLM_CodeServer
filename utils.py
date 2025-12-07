@@ -39,7 +39,23 @@ def prompt2messages(prompt):
         
     return {"messages": contents}
 
+
+def get_nostream_content(data_dict, encoding='utf-8'):
+    index = data_dict["index"] if "index" in data_dict.keys() else 0
+    content = ""
+    if "text" in data_dict.keys():
+        content = data_dict["text"]
+    elif "message" in data_dict.keys():
+        if "reasoning_content" in data_dict["message"].keys() and data_dict["message"]["reasoning_content"] != None:
+            content += "<think>\n" + data_dict["message"]["reasoning_content"] + "\n</think>\n"
+        if "reasoning_content" in data_dict["message"].keys() and data_dict["message"]["content"] != None:
+            content += data_dict["message"]["content"]
+    else: 
+        content = ""
+    return index, content.encode(encoding).decode("utf-8")
+
 def get_chuncked_content(data_dict, encoding="utf-8"):
+    index = data_dict["index"]
     if "text" in data_dict.keys():
         content = data_dict["text"]
     elif "delta" in data_dict.keys():
@@ -51,60 +67,64 @@ def get_chuncked_content(data_dict, encoding="utf-8"):
             content = ""
     else: 
         content = ""
-    return content.encode(encoding).decode("utf-8")
+    return index, content.encode(encoding).decode("utf-8")
 
 
-def concate_chunks(received_text, received_chunks, encoding="utf-8"):
+def concate_chunks(received_chunks, encoding="utf-8"):
     last_chunk = ""
     flag = 0
     chunks = received_chunks.split('\n\n')
     chunk_text = ""
-    if len(chunks) > 1:
-        for chunk in chunks[:-1]:
-            if chunk != "data: [DONE]":
-                last_chunk = chunk
-                try:
-                    data = json.loads(chunk.split("data: ")[1])["choices"][0]
-                    chunk_text = get_chuncked_content(data, encoding)
-                    received_text += chunk_text
-                except:
-                    print(chunk)
-                    if "data: " in chunk:
-                        data = json.loads(chunk.split("data: ")[1])['error']['message']
-                    else:
-                        data = json.loads(chunk)['message']
-                    print(data)
-                    received_text += data
-                    flag = -2
-                    return flag, received_text, chunk_text, chunks[-1], last_chunk
-                if "finish_reason" in data.keys() and not data["finish_reason"] in ["length", None]:
-                    if "stop_reason" in data.keys() and data["stop_reason"] in ["</answer>"]:
-                        # print(data["finish_reason"])
-                        flag = 1
-            else:
-                flag = -1
-                if DEBUG:
-                    print("="*9)
-                    print(chunk)
+    index = -1
+    data = ""
+    
+    if "data: [DONE]" in chunks[0]:
+        flag = -1
+        if DEBUG:
+            print("="*9)
+            print(chunks[0])
     else:
-        if chunks[0] == "data: [DONE]":
-            flag = -1
+        if len(chunks) > 1:
+            chunk = chunks[0]
+            last_chunk = chunk
+            try:
+                choices = json.loads(chunk.split("data: ")[1])["choices"]
+                if len(choices) > 0:
+                    data = json.loads(chunk.split("data: ")[1])["choices"][0]
+                    index, chunk_text = get_chuncked_content(data, encoding)
+                else:
+                    data = {}
+                    chunk_text = ""
+            except:
+                print(chunk)
+                if "data: " in chunk:
+                    data = json.loads(chunk.split("data: ")[1])['error']['message']
+                else:
+                    data = json.loads(chunk)['message']
+                print(data)
+                flag = -2
+                return flag, data, chunks[-1], last_chunk, index
+            if "finish_reason" in data.keys() and not data["finish_reason"] in ["length", None]:
+                if "stop_reason" in data.keys() and data["stop_reason"] in ["</answer>"]:
+                    # print(data["finish_reason"])
+                    flag = 1
+        else:
             if DEBUG:
                 print("="*9)
                 print(chunks[0])
-        try:
-            if "data: " in chunks[0]:
-                data = json.loads(chunks[0].split("data: ")[1])['error']['message']
-            else:
-                data = json.loads(chunks[0])['message']
-            print(data)
-            received_text += data
-            flag = -2
-        except:
-            pass
-        return flag, received_text, chunk_text, chunks[-1], last_chunk
+            try:
+                if "data: " in chunks[0]:
+                    data = json.loads(chunks[0].split("data: ")[1])['error']['message']
+                else:
+                    data = json.loads(chunks[0])['message']
+                print(data)
+                flag = -2
+                last_chunk = chunks[0]
+            except:
+                pass
+            return flag, data, chunks[-1], last_chunk, index
 
-    return flag, received_text, chunk_text, chunks[-1], last_chunk
+    return flag, chunk_text, chunks[-1], last_chunk, index
 
 def response_to_chunk(response_dict, chunksize=100):
     response_str = "data: " + json.dumps(response_dict, ensure_ascii=False) + '\n'*2
@@ -117,18 +137,35 @@ def response_to_chunk(response_dict, chunksize=100):
         print([len(i) for i in response_chunks])
     return response_chunks
 
-def text_to_stream(text_str, template):
+def text_to_stream(text_str, this_chunk, template, index=0):
     template_dict = json.loads(template.split("data: ")[1])
+    this_chunk_dict = json.loads(this_chunk.split("data: ")[1])
 
-    if "text" in template_dict["choices"][0].keys():
-        template_dict["choices"][0]["text"] = text_str
-    elif "delta" in template_dict["choices"][0].keys():
-        if "content" in template_dict["choices"][0]["delta"] and template_dict["choices"][0]["delta"]["content"] != None:
-            template_dict["choices"][0]["delta"]["content"] = text_str
-        elif "reasoning_content" in template_dict["choices"][0]["delta"] and template_dict["choices"][0]["delta"]["reasoning_content"] != None:
-            template_dict["choices"][0]["delta"]["reasoning_content"] = text_str
+    this_chunk_dict["id"] = template_dict["id"]
+    this_chunk_dict["object"] = template_dict["object"]
+    this_chunk_dict["created"] = template_dict["created"]
+    this_chunk_dict["model"] = template_dict["model"]
+    if len(this_chunk_dict["choices"]) != 0:
+
+        if "text" in this_chunk_dict["choices"][0].keys():
+            if "text" in template_dict["choices"][0].keys():
+                this_chunk_dict["choices"][0]["text"] = text_str
+            elif "delta" in template_dict["choices"][0].keys():
+                this_chunk_dict["choices"][0] = template_dict["choices"][0]
+                this_chunk_dict["choices"][0]["delta"]["content"] = text_str
+                this_chunk_dict["choices"][0].pop("text", None)
+                this_chunk_dict["choices"][0].pop("stop_reason", None)
+        elif "delta" in this_chunk_dict["choices"][0].keys():
+            if "content" in this_chunk_dict["choices"][0]["delta"] and this_chunk_dict["choices"][0]["delta"]["content"] != None:
+                this_chunk_dict["choices"][0]["delta"]["content"] = text_str
+            elif "reasoning_content" in this_chunk_dict["choices"][0]["delta"] and this_chunk_dict["choices"][0]["delta"]["reasoning_content"] != None:
+                this_chunk_dict["choices"][0]["delta"]["reasoning_content"] = text_str
         
-    chunks = response_to_chunk(template_dict)
+        this_chunk_dict["choices"][0]["index"] = index
+        
+        if this_chunk_dict["choices"][0]["finish_reason"] != None:
+            print(this_chunk_dict["choices"][0]["finish_reason"])
+    chunks = response_to_chunk(this_chunk_dict)
     return chunks
 
 
@@ -139,4 +176,3 @@ def get_end_of_string(text, template="</code>"):
     #         return template[i+1:]
     # return template
     return ""
-
