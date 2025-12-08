@@ -1,10 +1,10 @@
 from openai import OpenAI
 
-def ask_openai(base_url="http://localhost:5000/v1", model_name="Qwen3-8B", stop_str = ["</answer>", "</code>"]):
+def ask_openai(base_url="http://localhost:5000/v1", model_name="Qwen3-8B", stop_str = ["</answer>", "</code>"], api_key="EMPTY"):
 
     client = OpenAI(
     base_url=base_url,
-    api_key="EMPTY",
+    api_key=api_key,
     )
 
     question = "Every morning Aya goes for a $9$-kilometer-long walk and stops at a coffee shop afterwards. When she walks at a constant speed of $s$ kilometers per hour, the walk takes her 4 hours, including $t$ minutes spent in the coffee shop. When she walks $s+2$ kilometers per hour, the walk takes her 2 hours and 24 minutes, including $t$ minutes spent in the coffee shop. Suppose Aya walks at $s+\\frac{1}{2}$ kilometers per hour. Find the number of minutes the walk takes her, including the $t$ minutes spent in the coffee shop."
@@ -21,13 +21,14 @@ def ask_openai(base_url="http://localhost:5000/v1", model_name="Qwen3-8B", stop_
     print(completion)
     
     
-def ask_openai_stream(base_url="http://localhost:5000/v1", model_name="Qwen3-8B", stop_str = ["</answer>", "</code>"]):
+def ask_openai_stream(base_url="http://localhost:5000/v1", model_name="Qwen3-8B", stop_str = ["</answer>", "</code>"], api_key="EMPTY"):
 
     client = OpenAI(
     base_url=base_url,
-    api_key="EMPTY",
+    api_key=api_key,
     )
 
+    question = "使用python计算22^33答案用<answer></answer>包裹"
     question = "Every morning Aya goes for a $9$-kilometer-long walk and stops at a coffee shop afterwards. When she walks at a constant speed of $s$ kilometers per hour, the walk takes her 4 hours, including $t$ minutes spent in the coffee shop. When she walks $s+2$ kilometers per hour, the walk takes her 2 hours and 24 minutes, including $t$ minutes spent in the coffee shop. Suppose Aya walks at $s+\\frac{1}{2}$ kilometers per hour. Find the number of minutes the walk takes her, including the $t$ minutes spent in the coffee shop."
     retool_prompt = "Solve the following problem step by step. You now have the ability to selectively write executable Python code to enhance your reasoning process. The Python code will be executed by an external sandbox, and the output (wrapped in ```output{result}```) can be returned to aid your reasoning and help you arrive at the final answer. The Python code should be complete scripts, including necessary imports.\n\n**Code Format:**\nEach code snippet is wrapped with\n```python\ncode snippet\n```\n**Answer Format:**\nThe last part of your response should be:\n<answer>\\boxed{'The final answer goes here.'}</answer>\n\n**User Question:**\n{question}\n\n**Assistant:**\n"
     completion = client.completions.create(
@@ -41,7 +42,7 @@ def ask_openai_stream(base_url="http://localhost:5000/v1", model_name="Qwen3-8B"
         )
     output = ""
     for response in completion:
-        print(response)
+        print(response.model_dump()["choices"][0]["text"], end="")
         output += response.model_dump()["choices"][0]["text"]
     print("="*9)
     print(output)
@@ -173,12 +174,14 @@ def chat_openai_stream(base_url="http://localhost:5000/v1", model_name="Qwen3-8B
 
 
 if __name__ == '__main__':
-    base_url="http://localhost:5002/v1"
-    # base_url="https://api.siliconflow.cn/v1"
-    model_name="deepseek-ai/DeepSeek-R1"
+    # base_url="http://localhost:5002/v1"
+    base_url="https://api.siliconflow.cn/v1"
+    model_name="deepseek-ai/DeepSeek-R1-0528-Qwen3-8B"
+    # model_name="Qwen3-8B"
     API_key = "EMPTY"
+    # API_key = "EMPTY"
     stop_str = ["</answer>"]
-    # ask_openai_stream(base_url, model_name, stop_str)
-    # ask_openai(base_url, model_name, stop_str)
+    # ask_openai(base_url, model_name, stop_str, API_key)
+    ask_openai_stream(base_url, model_name, stop_str, API_key)
     # chat_openai_stream(base_url, model_name, API_key, stop_str)
-    chat_openai(base_url, model_name, API_key, stop_str)
+    # chat_openai(base_url, model_name, API_key, stop_str)

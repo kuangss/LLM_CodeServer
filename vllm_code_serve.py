@@ -62,11 +62,92 @@ def get_exec_result(response_text, is_lack_token):
     return exec_result
 
 
-def chat_complete_one(messages, req_method, req_headers, req_dict, req_args):
+def forward_request(target_url):
+    """通用转发函数，适配所有HTTP方法"""
+    # 保留原始查询参数
+    if request.query_string:
+        target_url += f'?{request.query_string.decode()}'
+    
+    # 构建请求头（移除Host头，添加X-Forwarded-For）
+    headers = {key: value for (key, value) in request.headers 
+               if key.lower() != 'host'}
+    headers['X-Forwarded-For'] = request.remote_addr
+    
+    # 根据请求方法准备请求参数
+    request_kwargs = {
+        'method': request.method,
+        'url': target_url,
+        'headers': headers,
+        'cookies': request.cookies,
+        'allow_redirects': False,
+        'timeout': 30
+    }
+    
+    # 处理不同请求方法的请求体
+    if request.method in ['POST', 'PUT', 'PATCH']:
+        # 检查是否为文件上传（multipart/form-data）
+        if request.content_type and 'multipart/form-data' in request.content_type:
+            # 处理文件上传
+            files = {}
+            data = {}
+            
+            for key in request.form:
+                data[key] = request.form[key]
+            
+            for key in request.files:
+                file_obj = request.files[key]
+                files[key] = (file_obj.filename, file_obj.stream, file_obj.content_type)
+            
+            request_kwargs['files'] = files
+            if data:
+                request_kwargs['data'] = data
+        else:
+            # 处理普通请求体（JSON、表单等）
+            if request.content_type and 'application/json' in request.content_type:
+                # JSON数据
+                if request.data:
+                    request_kwargs['json'] = request.get_json(silent=True) or {}
+            else:
+                # 表单数据或其他
+                if request.form:
+                    request_kwargs['data'] = request.form.to_dict()
+                elif request.data:
+                    request_kwargs['data'] = request.get_data()
+    
+    try:
+        # 发送请求
+        resp = requests.request(**request_kwargs)
+        
+        # 构建返回给客户端的响应
+        excluded_headers = ['content-encoding', 'content-length', 
+                           'transfer-encoding', 'connection']
+        response_headers = [(name, value) for (name, value) in resp.raw.headers.items()
+                           if name.lower() not in excluded_headers]
+        
+        return Response(resp.content, resp.status_code, response_headers)
+    
+    except requests.exceptions.ConnectionError:
+        return Response('后端服务不可用', status=502)
+    except requests.exceptions.Timeout:
+        return Response('请求超时', status=504)
+    except Exception as e:
+        app.logger.error(f'转发请求失败: {str(e)}')
+        return Response(f'代理服务器错误: {str(e)}', status=500)
+
+
+def chat_complete_one(messages, req_method, req_headers, req_dict, req_args, v1_path):
     message = ""
     for epoch in range(args.max_func_call):
 
-        query = "".join([message["role"] + ":\n" + message["content"] + '\n' for message in messages])
+        if v1_path == 'chat/completions':
+            query = "".join([message["role"] + ":\n" + message["content"] + '\n' for message in messages])
+            target_route = args.target_url + "/v1/chat/completions" if epoch == 0 else args.target_url + "/v1/completions"
+        elif v1_path == 'completions':
+            query = "".join([message["content"] for message in messages])
+            target_route = args.target_url + "/v1/completions"
+        else:
+            pass
+
         req_dict['prompt'] = query
         req_dict["messages"] = messages
         # req_dict.pop("messages", None)
@@ -74,7 +155,7 @@ def chat_complete_one(messages, req_method, req_headers, req_dict, req_args):
         req_bytes = bytes(req_json, encoding='utf-8')
         req_headers["Content-Length"] = str(len(req_bytes))
 
-        target_route = args.target_url + "/v1/chat/completions" if epoch == 0 else args.target_url + "/v1/completions"
+
         # send modified request
         response = requests.request(
             method=req_method,
@@ -84,7 +165,6 @@ def chat_complete_one(messages, req_method, req_headers, req_dict, req_args):
             params=req_args,
         )
         
-        print(response)
         if epoch == 0:
             prompt_tokens = response.json()["usage"]["prompt_tokens"]
             template = response
@@ -119,8 +199,11 @@ def chat_complete_one(messages, req_method, req_headers, req_dict, req_args):
     return template.status_code, template.headers, response_content_dict
 
 
-@app.route('/v1/chat/completions', methods=['GET', 'POST', 'PUT', 'DELETE'])
-def chat_completions(path=None):
+@app.route('/v1', defaults={'v1_path': ''})
+@app.route('/v1/<path:v1_path>', methods=['GET', 'POST', 'PUT', 'DELETE'])
+def chat_completions(v1_path=None):
+    """处理所有非API请求（原样转发），支持所有HTTP方法"""
+
     rsp_headers = {'date': datetime.datetime.now(datetime.timezone.utc).strftime(GMT_FORMAT), 
                    'server': 'uvicorn', 
                    'content-type': 'text/event-stream; charset=utf-8', 
@@ -132,6 +215,7 @@ def chat_completions(path=None):
     req_headers["Host"] = args.target_url.split("//")[-1]
     req_headers["Accept-Encoding"] = "identity"
     req_dict = request.get_json()
+    stop_strs = req_dict["stop"] if "stop" in req_dict.keys() else []
     # req_dict["stop"] = args.stop_strs
     # req_dict["priority"] = 1
     req_args = request.args
@@ -139,7 +223,13 @@ def chat_completions(path=None):
     n_sample = req_dict["n"] if "n" in req_dict.keys() else 1
     req_dict["n"] = 1
     req_dict['max_tokens'] = req_dict["max_tokens"] if "max_tokens" in req_dict else 8192
-    messages = [request.get_json()["messages"] for _ in range(n_sample)]
+
+    if v1_path == 'chat/completions':
+        messages = [request.get_json()["messages"] for _ in range(n_sample)]
+    elif v1_path == 'completions':
+        messages = [[{"role": "user", "content": request.get_json()["prompt"]}] for _ in range(n_sample)]
+    else:
+        pass
 
     if "stream" in req_dict.keys() and req_dict["stream"] == True:
         def generate():
@@ -158,7 +248,17 @@ def chat_completions(path=None):
                         print(f"finished{epoch}")
                         break
 
-                    query = "".join([message["role"] + ":\n" + message["content"] + '\n' for message in messages[index]])
+                    if v1_path == 'chat/completions':
+                        query = "".join([message["role"] + ":\n" + message["content"] + '\n' for message in messages[index]])
+                        target_route = args.target_url + "/v1/chat/completions" if epoch == 0 else args.target_url + "/v1/completions"
+                    elif v1_path == 'completions':
+                        query = "".join([message["content"] for message in messages[index]])
+                        target_route = args.target_url + "/v1/completions"
+                    else:
+                        pass
+                    # print(f"{v1_path = }")
+                    # print(f"{epoch = }")
+                    # print(messages[index])
                     req_dict['prompt'] = query
                     req_dict["messages"] = messages[index]
                     # req_dict.pop("messages", None)
@@ -166,7 +266,6 @@ def chat_completions(path=None):
                     req_bytes = bytes(req_json, encoding='utf-8')
                     req_headers["Content-Length"] = str(len(req_bytes))
 
-                    target_route = args.target_url + "/v1/chat/completions" if epoch == 0 else args.target_url + "/v1/completions"
                     
                     # send modified request
                     response = requests.request(
@@ -180,12 +279,13 @@ def chat_completions(path=None):
                     response_encoding = response.encoding
                     received = ""
                     
+                    messages[index].append({"role": "assistant", "content": ""})
                     for chunk in response.iter_content(chunk_size=CHUNK_SIZE, decode_unicode=True):
                         # data: {"id":"cmpl-7975264f5bf64aa3802a09f88e2a5772","object":"text_completion","created":1765100909,"model":"Qwen3-8B","choices":[{"index":1,"text":" so","logprobs":null,"finish_reason":null,"stop_reason":null}],"usage":null}
                         # data: {"id":"chatcmpl-9d80761cccbe4941891b5b0484b964b4","object":"chat.completion.chunk","created":1765101666,"model":"Qwen3-8B","choices":[{"index":1,"delta":{"content":","},"logprobs":null,"finish_reason":null}]}
                         if chunk:
                             received += chunk
-                            is_finished, chunk_text, received, last_chunk, index_re = concate_chunks(received, response_encoding)
+                            is_finished, chunk_text, received, last_chunk, index_re = concate_chunks(received, stop_strs, response_encoding)
                             # is_finished = 1: end with </answer>, is_finished = 0: not finished, is_finished = -1: end with length, is_finished = -2: error
                             if last_chunk != "":
                                 received_texts[epoch][index] += chunk_text
@@ -202,13 +302,14 @@ def chat_completions(path=None):
                             has_code, response_text = process_string(received_texts[epoch][index])
                             # has_code = 1: with complete code, has_code = 0: no code, has_code = -1: with incomplete code
 
+                            # add response to messages
+                            messages[index][-1]["content"] = response_text
                             if has_code == 1:
                                 # Execute the remain prompts
                                 is_lack_token = epoch >= args.max_func_call - 2
                                 exec_result = get_exec_result(response_text, is_lack_token)
 
-                                # add response and exec_result to messages
-                                messages[index].append({"role":"assistant", "content": response_text})
+                                # add exec_result to messages
                                 messages[index].append({"role":"user", "content": exec_result})
                                 response_text += exec_result
 
@@ -217,8 +318,7 @@ def chat_completions(path=None):
                                 more_chunks = text_to_stream(chunk_text + exec_result, last_chunk, template, index)
                                 
                                 if is_finished == 1:
-                                    more_chunks = more_chunks + text_to_stream("</answer>", last_chunk, template, index) + [
-                                        END_OF_CHUNKS]
+                                    more_chunks = more_chunks + [END_OF_CHUNKS]
                                 
                                 for more_chunk in more_chunks:
                                     yield more_chunk
@@ -231,7 +331,7 @@ def chat_completions(path=None):
                                 more_chunks = text_to_stream(chunk_text, last_chunk, template, index)
                             # end the loop, or continue by another request
                             if is_finished == 1:
-                                more_chunks = more_chunks + text_to_stream("</answer>", last_chunk, template, index) + [END_OF_CHUNKS]
+                                more_chunks = more_chunks + [END_OF_CHUNKS]
                             
                             for more_chunk in more_chunks:
                                 yield more_chunk
@@ -278,7 +378,7 @@ def chat_completions(path=None):
         def chat_complete_wrapper(index, messages, req_method, req_headers, req_dict, req_args):
             """包装 chat_complete_one 函数以在线程中执行"""
             nonlocal response_status_code, response_headers
-            response_status_code, response_headers, result = chat_complete_one(messages, req_method, req_headers, req_dict, req_args)
+            response_status_code, response_headers, result = chat_complete_one(messages, req_method, req_headers, req_dict, req_args, v1_path)
             responses[index] = result
             with lock:
                 completed_count[0] += 1
@@ -320,146 +420,37 @@ def chat_completions(path=None):
         )
 
 
-@app.route('/', methods=['GET', 'POST', 'PUT', 'DELETE'])
-@app.route('/v1/completions', methods=['GET', 'POST', 'PUT', 'DELETE'])
-def completions(path=None):
-    # get requests
-    req_method = request.method
-    req_headers = {key:value for key, value in request.headers.items()}
-    req_dict = request.get_json()
-    rsp_headers = {'date': datetime.datetime.now(datetime.timezone.utc).strftime(GMT_FORMAT), 
-                   'server': 'uvicorn', 
-                   'content-type': 'text/event-stream; charset=utf-8', 
-                   'connection': 'close'}
-
-    if "stream" in req_dict.keys() and req_dict["stream"] == True :
-        params = request.args
-        def generate():
-            response_text = ""
-            query = req_dict['prompt']
-            len_raw_request = int(req_headers["Content-Length"]) - len(query)
-            template = ""
-            is_finished = 0
-            for epoch in range(args.max_func_call):
-                if is_finished == 1:
-                    return
-                query += response_text
-                req_dict['prompt'] = query
-                req_headers["Content-Length"] = str(len_raw_request + len(req_dict['prompt']))
-                response = requests.request(
-                    req_method,
-                    f"{args.target_url}/v1/completions",
-                    headers=req_headers,
-                    json=req_dict,
-                    params=params,
-                    stream=True
-                )
-                received = ""
-                received_text = ""
-                for chunk in response.iter_content(chunk_size=CHUNK_SIZE, decode_unicode=True):
-
-                    if chunk:
-                        received += chunk
-                        is_finished, received_text, chunk_text, received, last_chunk = concate_chunks(received_text, received)
-                        # is_finished = 1: end with </answer>, is_finished = 0: not finished, is_finished = -1: end with length, is_finished = -2: error
-                        if last_chunk != "" and epoch == 0:
-                            template = last_chunk
-                        
-                        # check if has code, concate the exec result by responding a chunk
-                        has_code, response_text = process_string(received_text)
-                        # has_code = 1: with complete code, has_code = 0: no code, has_code = -1: with incomplete code
-
-
-                        if has_code == 1:
-                            # Execute the remain prompts
-                            is_lack_token = epoch >= args.max_func_call - 2
-                            exec_result = get_exec_result(response_text, is_lack_token)
-                            response_text += exec_result
-                            if DEBUG:
-                                print(received_text)
-                            remain_text = get_end_of_string(received_text)
-                            more_chunks = text_to_stream(remain_text + exec_result, last_chunk, template)
-                            # send last chunk first
-                            more_chunks = [chunk] + more_chunks
-                            if is_finished == 1:
-                                more_chunks = more_chunks + text_to_stream("</answer>", last_chunk, template) + ["data: [DONE]\n\n"]
-                            for more_chunk in more_chunks:
-                                yield more_chunk
-                            break
-
-                        if LOG:
-                            print(received_text)
-
-                        # end the loop, or continue by another request
-                        if is_finished == 1:
-                            more_chunks = text_to_stream("</answer>", last_chunk, template)
-                            more_chunks = [chunk] + more_chunks + ["data: [DONE]\n\n"]
-                            for more_chunk in more_chunks:
-                                yield more_chunk
-                            break
-                        elif is_finished == 0:
-                            yield chunk
-                        elif is_finished == -1:
-                            pass
-                
-
-        return Response(
-            generate(),
-            status=200,
-            headers=rsp_headers
-        )
-
-    
+@app.route('/', defaults={'other_path': ''})
+@app.route('/<path:other_path>')
+def handle_other(other_path):
+    """处理所有非API请求（原样转发），支持所有HTTP方法"""
+    if other_path:
+        target_url = f'{args.target_url}/{other_path}'
     else:
-        query = req_dict['prompt']
-        len_raw_query = len(query)
-        for epoch in range(args.max_func_call):
-            
-            req_dict['prompt'] = query
-            # edit content-length, otherwise the response_text is not used.
-            req_headers["Content-Length"] = str(int(req_headers["Content-Length"]) + len(req_dict['prompt']) - len_raw_query)
-            response = requests.request(
-                req_method,
-                f"{args.target_url}/v1/completions",
-                headers=req_headers,
-                json=req_dict,
-                params=request.args,
-            )
-            flag, response_text = process_string(response.json()["choices"][0]['text'])
-            # flag = 1: with complete code, flag = 0: no code, flag = -1: with incomplete code
+        target_url = args.target_url
+    
+    app.logger.info(f"非v1请求 {request.method}: /{other_path} -> {target_url}")
+    return forward_request(target_url)
 
-            query += response_text
-
-            if DEBUG:
-                try:
-                    print("="*9)
-                    print(response.json()['choices'][0]['finish_reason'])#, response.json()['choices'][0]['stop_reason']
-                    print("="*9)
-                except Exception as e:
-                    print(e)
-
-            # Execute the remain prompts
-            if flag == 1:
-                is_lack_token = epoch >= args.max_func_call - 2
-                exec_result = get_exec_result(response_text, is_lack_token)
-                query += exec_result
-            else:
-                if 'finish_reason' in response.json()['choices'][0]:
-                    if response.json()['choices'][0]['finish_reason'] == "stop":
-                    # if response.json()['choices'][0]['finish_reason'] == "stop" and response.json()['choices'][0]['stop_reason'] in ["</answer>"]:
-                    #     query += response.json()['choices'][0]['stop_reason']
-                        break
-
-            if LOG:
-                print(query)
-
-        response_content_dict = response.json()
-        response_content_dict["choices"][0]["text"]=query
-        return Response(
-            json.dumps(response_content_dict),
-            status=response.status_code,
-            headers=dict(response.headers)
-        )
+# 添加OPTIONS方法支持（用于CORS预检请求）
+@app.route('/v1', defaults={'api_path': ''}, methods=['OPTIONS'])
+@app.route('/v1/<path:api_path>', methods=['OPTIONS'])
+@app.route('/', defaults={'other_path': ''}, methods=['OPTIONS'])
+@app.route('/<path:other_path>', methods=['OPTIONS'])
+def handle_options(api_path='', other_path=''):
+    """处理OPTIONS预检请求"""
+    # 确定目标URL
+    if request.path.startswith('/api'):
+        target_base = args.target_url
+        path_part = request.path[4:] if len(request.path) > 4 else ''
+    else:
+        target_base = args.target_url
+        path_part = request.path[1:] if len(request.path) > 1 else ''
+    
+    target_url = f'{target_base}/{path_part}' if path_part else target_base
+    
+    # 转发OPTIONS请求
+    return forward_request(target_url)
 
 
 if __name__ == '__main__':

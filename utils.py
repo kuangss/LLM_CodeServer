@@ -70,7 +70,8 @@ def get_chuncked_content(data_dict, encoding="utf-8"):
     return index, content.encode(encoding).decode("utf-8")
 
 
-def concate_chunks(received_chunks, encoding="utf-8"):
+def concate_chunks(received_chunks, stop_strs, encoding="utf-8"):
+    # is_finished = 1: end with </answer>, is_finished = 0: not finished, is_finished = -1: end with length, is_finished = -2: error
     last_chunk = ""
     flag = 0
     chunks = received_chunks.split('\n\n')
@@ -92,6 +93,11 @@ def concate_chunks(received_chunks, encoding="utf-8"):
                 if len(choices) > 0:
                     data = json.loads(chunk.split("data: ")[1])["choices"][0]
                     index, chunk_text = get_chuncked_content(data, encoding)
+                    
+                    if "finish_reason" in data.keys() and not data["finish_reason"] in ["length", "", None]:
+                        if "stop_reason" in data.keys() and data["stop_reason"] in stop_strs:
+                            chunk_text += data["stop_reason"]
+                        flag = 1
                 else:
                     data = {}
                     chunk_text = ""
@@ -104,10 +110,6 @@ def concate_chunks(received_chunks, encoding="utf-8"):
                 print(data)
                 flag = -2
                 return flag, data, chunks[-1], last_chunk, index
-            if "finish_reason" in data.keys() and not data["finish_reason"] in ["length", None]:
-                if "stop_reason" in data.keys() and data["stop_reason"] in ["</answer>"]:
-                    # print(data["finish_reason"])
-                    flag = 1
         else:
             if DEBUG:
                 print("="*9)
@@ -117,7 +119,7 @@ def concate_chunks(received_chunks, encoding="utf-8"):
                     data = json.loads(chunks[0].split("data: ")[1])['error']['message']
                 else:
                     data = json.loads(chunks[0])['message']
-                print(data)
+                print(f"{data = }")
                 flag = -2
                 last_chunk = chunks[0]
             except:
@@ -163,8 +165,6 @@ def text_to_stream(text_str, this_chunk, template, index=0):
         
         this_chunk_dict["choices"][0]["index"] = index
         
-        if this_chunk_dict["choices"][0]["finish_reason"] != None:
-            print(this_chunk_dict["choices"][0]["finish_reason"])
     chunks = response_to_chunk(this_chunk_dict)
     return chunks
 
